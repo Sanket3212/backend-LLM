@@ -7,9 +7,7 @@ import logging
 import gc
 import threading
 import re
-import requests
 from typing import Dict, List, Any, Optional
-from dataclasses import dataclass
 from datetime import datetime
 
 # Configure logging
@@ -78,224 +76,10 @@ MENU = {
     }
 }
 
-@dataclass
-class OrderItem:
-    name: str
-    quantity: int
-    unit_price: float
-    total_price: float
-
-@dataclass
-class OrderTicket:
-    ticket_id: str
-    timestamp: datetime
-    items: List[OrderItem]
-    subtotal: float
-    tax: float
-    total: float
-    status: str = "pending"
-    mantis_ticket_id: Optional[int] = None
-    mantis_url: Optional[str] = None
-
-# MantisBT Integration Class
-class MantisBTIntegration:
-    """MantisBT integration for creating order tickets"""
-    
-    def __init__(self, base_url: str, api_key: str):
-        self.base_url = base_url.rstrip('/')
-        self.api_key = api_key
-        self.headers = {
-            'Authorization': api_key,
-            'Content-Type': 'application/json'
-        }
-        self.api_endpoint = f"{self.base_url}/api/rest"
-        
-    def test_connection(self) -> bool:
-        """Test connection to MantisBT API"""
-        try:
-            response = requests.get(
-                f"{self.api_endpoint}/users/me",
-                headers=self.headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                logger.info("MantisBT connection successful")
-                return True
-            else:
-                logger.error(f"MantisBT connection failed: {response.status_code} - {response.text}")
-                return False
-                
-        except requests.RequestException as e:
-            logger.error(f"MantisBT connection error: {e}")
-            return False
-    
-    def get_projects(self) -> Optional[list]:
-        """Get available projects"""
-        try:
-            response = requests.get(
-                f"{self.api_endpoint}/projects",
-                headers=self.headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                projects = response.json()
-                logger.info(f"Found {len(projects.get('projects', []))} projects")
-                return projects.get('projects', [])
-            else:
-                logger.error(f"Failed to get projects: {response.status_code}")
-                return None
-                
-        except requests.RequestException as e:
-            logger.error(f"Error getting projects: {e}")
-            return None
-    
-    def create_order_ticket(self, order_ticket: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Create a MantisBT ticket for a confirmed order"""
-        try:
-            # Format order details
-            summary = f"Food Order #{order_ticket['id']} - Total: ${order_ticket['total']:.2f}"
-            
-            # Create detailed description
-            description = self._format_order_description(order_ticket)
-            
-            # Create Mantis ticket payload
-            mantis_ticket = {
-                "summary": summary,
-                "description": description,
-                "category": {"name": "Order Processing"},
-                "priority": {"name": "normal"},
-                "severity": {"name": "minor"},
-                "project": {"id": 1},  # Default project ID
-                "status": {"name": "new"},
-                "tags": [
-                    {"name": "food-order"},
-                    {"name": f"order-{order_ticket['id']}"},
-                    {"name": "automated"}
-                ]
-            }
-            
-            # Send request to MantisBT
-            response = requests.post(
-                f"{self.api_endpoint}/issues",
-                headers=self.headers,
-                json=mantis_ticket,
-                timeout=15
-            )
-            
-            if response.status_code == 201:
-                mantis_response = response.json()
-                logger.info(f"MantisBT ticket created successfully: {mantis_response.get('issue', {}).get('id')}")
-                return {
-                    "success": True,
-                    "mantis_ticket_id": mantis_response.get('issue', {}).get('id'),
-                    "mantis_url": f"{self.base_url}/view.php?id={mantis_response.get('issue', {}).get('id')}",
-                    "summary": summary
-                }
-            else:
-                logger.error(f"Failed to create MantisBT ticket: {response.status_code} - {response.text}")
-                return {
-                    "success": False,
-                    "error": f"MantisBT API error: {response.status_code}",
-                    "details": response.text
-                }
-                
-        except requests.RequestException as e:
-            logger.error(f"Error creating MantisBT ticket: {e}")
-            return {
-                "success": False,
-                "error": f"Connection error: {str(e)}"
-            }
-        except Exception as e:
-            logger.error(f"Unexpected error creating MantisBT ticket: {e}")
-            return {
-                "success": False,
-                "error": f"Unexpected error: {str(e)}"
-            }
-    
-    def _format_order_description(self, order_ticket: Dict[str, Any]) -> str:
-        """Format order details for MantisBT description"""
-        description = f"""
-**Food Order Details**
-
-**Order ID:** {order_ticket['id']}
-**Timestamp:** {order_ticket['timestamp']}
-**Status:** {order_ticket.get('status', 'Confirmed')}
-
-**Items Ordered:**
-"""
-        
-        for item in order_ticket.get('items', []):
-            description += f"- {item['name']} x{item['qty']} @ ${item['unit_price']:.2f} each = ${item['price']:.2f}\n"
-        
-        description += f"""
-**Order Summary:**
-- Subtotal: ${order_ticket.get('subtotal', 0):.2f}
-- Tax: ${order_ticket.get('tax', 0):.2f}
-- **Total: ${order_ticket.get('total', 0):.2f}**
-
-**Order Processing Notes:**
-- Order was placed through the automated food ordering system
-- Customer confirmation received
-- Payment processing required
-- Kitchen notification needed
-
-**Next Actions:**
-1. Process payment
-2. Send order to kitchen
-3. Update customer on order status
-4. Prepare order for pickup/delivery
-
-*This ticket was automatically created by the food ordering system.*
-"""
-        
-        return description.strip()
-    
-    def update_ticket_status(self, ticket_id: int, status: str, note: str = "") -> bool:
-        """Update MantisBT ticket status"""
-        try:
-            update_payload = {
-                "status": {"name": status}
-            }
-            
-            if note:
-                update_payload["notes"] = [{"text": note}]
-            
-            response = requests.patch(
-                f"{self.api_endpoint}/issues/{ticket_id}",
-                headers=self.headers,
-                json=update_payload,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"MantisBT ticket {ticket_id} updated to status: {status}")
-                return True
-            else:
-                logger.error(f"Failed to update MantisBT ticket: {response.status_code}")
-                return False
-                
-        except requests.RequestException as e:
-            logger.error(f"Error updating MantisBT ticket: {e}")
-            return False
-
-# Initialize MantisBT integration
-MANTIS_CONFIG = {
-    "base_url": "https://sanketkumbhar.mantishub.io",
-    "api_key": "hQNZgJjCafmXDAXCBuIrBz0cQInVvTYz"
-}
-
-mantis_integration = MantisBTIntegration(
-    base_url=MANTIS_CONFIG["base_url"],
-    api_key=MANTIS_CONFIG["api_key"]
-)
-
 class EnhancedOrderProcessor:
     def __init__(self):
         self.current_cart = []
         self.conversation_history = []
-        self.ticket_counter = 1000
         
     def normalize_item_name(self, input_name: str) -> Optional[str]:
         """Normalize item name using aliases"""
@@ -386,41 +170,6 @@ class EnhancedOrderProcessor:
                 item['qty'] = qty
                 item['price'] = unit_price * qty
                 return
-    
-    def generate_ticket(self) -> OrderTicket:
-        """Generate Mantis-style order ticket"""
-        if not self.current_cart:
-            return None
-        
-        ticket_id = f"ORD-{self.ticket_counter}"
-        self.ticket_counter += 1
-        
-        order_items = []
-        subtotal = 0
-        
-        for cart_item in self.current_cart:
-            item = OrderItem(
-                name=cart_item['name'],
-                quantity=cart_item['qty'],
-                unit_price=cart_item['unit_price'],
-                total_price=cart_item['price']
-            )
-            order_items.append(item)
-            subtotal += cart_item['price']
-        
-        tax = round(subtotal * 0.08, 2)  # 8% tax
-        total = round(subtotal + tax, 2)
-        
-        ticket = OrderTicket(
-            ticket_id=ticket_id,
-            timestamp=datetime.now(),
-            items=order_items,
-            subtotal=subtotal,
-            tax=tax,
-            total=total
-        )
-        
-        return ticket
 
 order_processor = EnhancedOrderProcessor()
 
@@ -496,30 +245,16 @@ IMPORTANT: Return ONLY valid JSON. No explanations outside JSON."""
     
     return prompt
 
-# API Routes
-
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Enhanced health check with MantisBT status"""
-    mantis_status = mantis_integration.test_connection()
-    
+    """Enhanced health check"""
     return jsonify({
         "status": "healthy", 
         "service": "enhanced-food-ordering-api",
         "gemini_configured": model is not None,
-        "mantis_configured": mantis_status,
         "menu_items": len(MENU),
         "cart_items": len(order_processor.current_cart),
-        "features": [
-            "enhanced_nlp", 
-            "mantis_ticketing", 
-            "conversation_context",
-            "automated_tracking"
-        ],
-        "integrations": {
-            "gemini_ai": model is not None,
-            "mantis_bt": mantis_status
-        }
+        "features": ["enhanced_nlp", "conversation_context"]
     })
 
 @app.route('/menu', methods=['GET'])
@@ -627,74 +362,26 @@ def process_order():
             }
         
         elif intent == 'finalize_order':
-            ticket = order_processor.generate_ticket()
-            if ticket:
-                # Prepare ticket data for MantisBT
-                ticket_data = {
-                    "id": ticket.ticket_id,
-                    "timestamp": ticket.timestamp.isoformat(),
-                    "items": [
-                        {
-                            "name": item.name,
-                            "qty": item.quantity,
-                            "unit_price": item.unit_price,
-                            "price": item.total_price
-                        }
-                        for item in ticket.items
-                    ],
-                    "subtotal": ticket.subtotal,
-                    "tax": ticket.tax,
-                    "total": ticket.total,
-                    "status": "confirmed"
-                }
-                
-                # Create MantisBT ticket
-                mantis_result = None
-                if mantis_integration.test_connection():
-                    mantis_result = mantis_integration.create_order_ticket(ticket_data)
-                    if mantis_result and mantis_result.get("success"):
-                        ticket.mantis_ticket_id = mantis_result.get("mantis_ticket_id")
-                        ticket.mantis_url = mantis_result.get("mantis_url")
-                        logger.info(f"Created MantisBT ticket #{ticket.mantis_ticket_id} for order {ticket.ticket_id}")
+            if order_processor.current_cart:
+                subtotal = order_processor.get_cart_total()
+                tax = round(subtotal * 0.08, 2)
+                final_total = round(subtotal + tax, 2)
                 
                 response_data = {
                     "intent": intent,
                     "items": order_processor.current_cart,
-                    "total": ticket.total,
-                    "message": f"Order finalized! Ticket #{ticket.ticket_id}",
-                    "ticket": {
-                        "id": ticket.ticket_id,
-                        "timestamp": ticket.timestamp.isoformat(),
-                        "subtotal": ticket.subtotal,
-                        "tax": ticket.tax,
-                        "total": ticket.total,
-                        "items": [{"name": item.name, "qty": item.quantity, "price": item.total_price} 
-                                for item in ticket.items]
+                    "subtotal": subtotal,
+                    "tax": tax,
+                    "total": final_total,
+                    "message": f"Order finalized! Subtotal: ${subtotal:.2f}, Tax: ${tax:.2f}, Total: ${final_total:.2f}",
+                    "order_summary": {
+                        "items": order_processor.current_cart,
+                        "subtotal": subtotal,
+                        "tax": tax,
+                        "total": final_total,
+                        "timestamp": datetime.now().isoformat()
                     }
                 }
-                
-                # Add MantisBT information if successful
-                if mantis_result and mantis_result.get("success"):
-                    response_data["mantis"] = {
-                        "ticket_id": mantis_result.get("mantis_ticket_id"),
-                        "url": mantis_result.get("mantis_url"),
-                        "status": "created",
-                        "message": f"MantisBT ticket #{mantis_result.get('mantis_ticket_id')} created"
-                    }
-                    response_data["message"] += f" MantisBT tracking ticket #{mantis_result.get('mantis_ticket_id')} created."
-                elif mantis_result:
-                    response_data["mantis"] = {
-                        "status": "failed",
-                        "error": mantis_result.get("error", "Unknown error"),
-                        "message": "Failed to create MantisBT ticket"
-                    }
-                    response_data["message"] += " (Note: MantisBT ticket creation failed)"
-                else:
-                    response_data["mantis"] = {
-                        "status": "unavailable",
-                        "message": "MantisBT service unavailable"
-                    }
-                
                 # Clear cart after finalizing
                 order_processor.current_cart = []
             else:
@@ -807,326 +494,49 @@ def clear_cart():
 
 @app.route('/finalize', methods=['POST'])
 def finalize_order():
-    """Generate final order ticket and create MantisBT ticket"""
-    ticket = order_processor.generate_ticket()
-    
-    if not ticket:
+    """Finalize order without ticket generation"""
+    if not order_processor.current_cart:
         return jsonify({"error": "Cart is empty"}), 400
     
-    # Prepare ticket data for MantisBT
-    ticket_data = {
-        "id": ticket.ticket_id,
-        "timestamp": ticket.timestamp.isoformat(),
+    subtotal = order_processor.get_cart_total()
+    tax = round(subtotal * 0.08, 2)
+    final_total = round(subtotal + tax, 2)
+    
+    order_summary = {
+        "timestamp": datetime.now().isoformat(),
         "items": [
             {
-                "name": item.name,
-                "qty": item.quantity,
-                "unit_price": item.unit_price,
-                "price": item.total_price
+                "name": item["name"],
+                "quantity": item["qty"],
+                "unit_price": item["unit_price"],
+                "total_price": item["price"]
             }
-            for item in ticket.items
+            for item in order_processor.current_cart
         ],
-        "subtotal": ticket.subtotal,
-        "tax": ticket.tax,
-        "total": ticket.total,
-        "status": "confirmed"
+        "subtotal": subtotal,
+        "tax": tax,
+        "total": final_total,
+        "status": "completed"
     }
-    
-    # Create MantisBT ticket
-    mantis_result = None
-    if mantis_integration.test_connection():
-        mantis_result = mantis_integration.create_order_ticket(ticket_data)
-        if mantis_result and mantis_result.get("success"):
-            ticket.mantis_ticket_id = mantis_result.get("mantis_ticket_id")
-            ticket.mantis_url = mantis_result.get("mantis_url")
-            logger.info(f"Created MantisBT ticket #{ticket.mantis_ticket_id} for order {ticket.ticket_id}")
     
     # Clear cart after finalizing
     order_processor.current_cart = []
     
-    # Prepare response
-    response_data = {
-        "ticket": {
-            "id": ticket.ticket_id,
-            "timestamp": ticket.timestamp.isoformat(),
-            "items": [
-                {
-                    "name": item.name,
-                    "quantity": item.quantity,
-                    "unit_price": item.unit_price,
-                    "total_price": item.total_price
-                }
-                for item in ticket.items
-            ],
-            "subtotal": ticket.subtotal,
-            "tax": ticket.tax,
-            "total": ticket.total,
-            "status": ticket.status
-        },
-        "message": f"Order ticket #{ticket.ticket_id} generated successfully!"
-    }
-    
-    # Add MantisBT information if successful
-    if mantis_result and mantis_result.get("success"):
-        response_data["mantis"] = {
-            "ticket_id": mantis_result.get("mantis_ticket_id"),
-            "url": mantis_result.get("mantis_url"),
-            "status": "created",
-            "message": f"MantisBT ticket #{mantis_result.get('mantis_ticket_id')} created"
-        }
-        response_data["message"] += f" MantisBT tracking ticket #{mantis_result.get('mantis_ticket_id')} created."
-    elif mantis_result:
-        response_data["mantis"] = {
-            "status": "failed",
-            "error": mantis_result.get("error", "Unknown error"),
-            "message": "Failed to create MantisBT ticket"
-        }
-        response_data["message"] += " (Note: MantisBT ticket creation failed)"
-    else:
-        response_data["mantis"] = {
-            "status": "unavailable",
-            "message": "MantisBT service unavailable"
-        }
-    
-    return jsonify(response_data)
-
-# MantisBT specific endpoints
-@app.route('/mantis/status', methods=['GET'])
-def mantis_status():
-    """Check MantisBT connection status"""
-    try:
-        connection_ok = mantis_integration.test_connection()
-        projects = mantis_integration.get_projects() if connection_ok else None
-        
-        return jsonify({
-            "mantis_connected": connection_ok,
-            "base_url": MANTIS_CONFIG["base_url"],
-            "api_configured": bool(MANTIS_CONFIG["api_key"]),
-            "status": "connected" if connection_ok else "disconnected",
-            "projects_count": len(projects) if projects else 0,
-            "timestamp": datetime.now().isoformat()
-        })
-    except Exception as e:
-        return jsonify({
-            "mantis_connected": False,
-            "error": str(e),
-            "status": "error",
-            "timestamp": datetime.now().isoformat()
-        }), 500
-
-@app.route('/mantis/test', methods=['POST'])
-def test_mantis_ticket():
-    """Test MantisBT ticket creation"""
-    try:
-        # Create a test order
-        test_order = {
-            "id": f"TEST-{int(datetime.now().timestamp())}",
-            "timestamp": datetime.now().isoformat(),
-            "items": [
-                {"name": "Test Chicken Sandwich", "qty": 1, "unit_price": 5.0, "price": 5.0},
-                {"name": "Test Fries", "qty": 1, "unit_price": 2.0, "price": 2.0}
-            ],
-            "subtotal": 7.0,
-            "tax": 0.56,
-            "total": 7.56,
-            "status": "test"
-        }
-        
-        result = mantis_integration.create_order_ticket(test_order)
-        
-        if result and result.get("success"):
-            return jsonify({
-                "success": True,
-                "mantis_ticket_id": result.get("mantis_ticket_id"),
-                "mantis_url": result.get("mantis_url"),
-                "message": "Test ticket created successfully",
-                "test_order": test_order
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get("error", "Unknown error") if result else "No result",
-                "message": "Failed to create test ticket"
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "message": "Error creating test ticket"
-        }), 500
-
-@app.route('/mantis/projects', methods=['GET'])
-def get_mantis_projects():
-    """Get MantisBT projects"""
-    try:
-        if not mantis_integration.test_connection():
-            return jsonify({"error": "Cannot connect to MantisBT"}), 503
-            
-        projects = mantis_integration.get_projects()
-        
-        if projects:
-            return jsonify({
-                "success": True,
-                "projects": projects,
-                "count": len(projects)
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": "Failed to retrieve projects"
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-@app.route('/mantis/update/<int:ticket_id>', methods=['POST'])
-def update_mantis_ticket(ticket_id):
-    """Update MantisBT ticket status"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No JSON data provided"}), 400
-            
-        status = data.get('status', 'acknowledged')
-        note = data.get('note', '')
-        
-        success = mantis_integration.update_ticket_status(ticket_id, status, note)
-        
-        if success:
-            return jsonify({
-                "success": True,
-                "message": f"Ticket {ticket_id} updated to status: {status}"
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": "Failed to update ticket"
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-# Enhanced statistics endpoint
-@app.route('/stats', methods=['GET'])
-def get_stats():
-    """Get system statistics"""
     return jsonify({
-        "system": {
-            "status": "running",
-            "uptime": "N/A",  # You can implement uptime tracking
-            "timestamp": datetime.now().isoformat()
-        },
-        "menu": {
-            "total_items": len(MENU),
-            "items": list(MENU.keys())
-        },
-        "cart": {
-            "items_count": len(order_processor.current_cart),
-            "total_value": order_processor.get_cart_total(),
-            "items": order_processor.current_cart
-        },
-        "conversation": {
-            "messages_count": len(order_processor.conversation_history)
-        },
-        "integrations": {
-            "gemini_ai": model is not None,
-            "mantis_bt": mantis_integration.test_connection()
-        },
-        "orders": {
-            "last_ticket_number": order_processor.ticket_counter - 1
-        }
+        "order_summary": order_summary,
+        "message": f"Order completed successfully! Total: ${final_total:.2f}"
     })
 
-# Error handlers
 @app.errorhandler(500)
 def internal_error(error):
-    logger.error(f"Internal server error: {error}")
-    return jsonify({
-        "error": "Internal server error",
-        "timestamp": datetime.now().isoformat()
-    }), 500
+    return jsonify({"error": "Internal server error"}), 500
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({
-        "error": "Endpoint not found",
-        "available_endpoints": [
-            "/health", "/menu", "/process-order", "/cart", "/cart/clear", 
-            "/finalize", "/mantis/status", "/mantis/test", "/mantis/projects", 
-            "/mantis/update/<ticket_id>", "/stats"
-        ],
-        "timestamp": datetime.now().isoformat()
-    }), 404
+    return jsonify({"error": "Endpoint not found"}), 404
 
-@app.errorhandler(400)
-def bad_request(error):
-    return jsonify({
-        "error": "Bad request",
-        "message": "Please check your request format",
-        "timestamp": datetime.now().isoformat()
-    }), 400
-
-# Utility function to create mantis ticket for order (can be used programmatically)
-def create_mantis_ticket_for_order(order_ticket: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Create MantisBT ticket for confirmed order
-    
-    Args:
-        order_ticket: Order ticket data from the food ordering system
-        
-    Returns:
-        Dict containing success status and MantisBT ticket details
-    """
-    
-    # Test connection first
-    if not mantis_integration.test_connection():
-        return {
-            "success": False,
-            "error": "Unable to connect to MantisBT",
-            "mantis_ticket_id": None
-        }
-    
-    # Create the ticket
-    result = mantis_integration.create_order_ticket(order_ticket)
-    
-    if result and result.get("success"):
-        logger.info(f"Successfully created MantisBT ticket for order {order_ticket['id']}")
-        return {
-            "success": True,
-            "mantis_ticket_id": result.get("mantis_ticket_id"),
-            "mantis_url": result.get("mantis_url"),
-            "summary": result.get("summary"),
-            "message": f"Order ticket created in MantisBT: #{result.get('mantis_ticket_id')}"
-        }
-    else:
-        logger.error(f"Failed to create MantisBT ticket: {result}")
-        return {
-            "success": False,
-            "error": result.get("error", "Unknown error") if result else "No result",
-            "mantis_ticket_id": None,
-            "message": "Failed to create MantisBT ticket"
-        }
-
-# Main application startup
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug_mode = os.environ.get('FLASK_ENV', 'production') == 'development'
-    
     logger.info(f"Starting enhanced food ordering server on port {port}")
-    logger.info(f"MantisBT URL: {MANTIS_CONFIG['base_url']}")
-    logger.info(f"Gemini AI configured: {model is not None}")
-    
-    # Test MantisBT connection on startup
-    if mantis_integration.test_connection():
-        logger.info("✅ MantisBT connection successful on startup")
-    else:
-        logger.warning("⚠️ MantisBT connection failed on startup")
-    
     app.run(host='0.0.0.0', port=port, debug=debug_mode)
